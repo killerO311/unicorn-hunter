@@ -1,38 +1,49 @@
-# THE HUNTER
-**Unicorn breakout scanner — Qullamaggie-style momentum + FMP bulk float + Finviz zero-key fallback**
+# THE HUNTER v1.2 — SUPER HUNTER
 
-Hunts low-float, high-relative-strength breakouts across NYSE and Nasdaq.
-Free data. No paid APIs required. One Python file.
+Qullamaggie-style breakout scanner that now **hunts and trades**, not just observes.
 
-## Pipeline
-1. **Universe** — ~2,300 tickers (S&P 500 + momentum supplements)
-2. **Factors** — 60-day RS vs SPY, volume spike vs 20-day avg, 20-day consolidation tightness, distance from 60-day high, weekly confluence, 14-day ATR
-3. **Float** — bulk fetch from Financial Modeling Prep (free plan, single call, up to 5,000 records). If no FMP key is set, automatically falls back to scraping float from Finviz quote pages (zero-key, ~3 sec/ticker with polite delays).
-4. **Filter** — float ≤ 50M shares, RS > 0, tightness < 35%, within 8% of 60-day high
-5. **Rank** — weighted score, top 15 printed + saved to CSV
+## What it does
 
-## Quick start
+1. Scans ~2,300 NYSE/Nasdaq names every morning via free yfinance data
+2. Scores six breakout factors: RS vs SPY, volume spike, consolidation tightness, breakout level, weekly confluence, ATR
+3. Float filter: Financial Modeling Prep bulk call if `FMP_API_KEY` is set, otherwise auto-falls back to scraping Finviz (zero-key, polite delays)
+4. Filters: float ≤ 50M shares, price > $2, RS > 0, 20-day tightness < 35%, within 8% of 60-day high
+5. Ranks top 15 and prints stops (3xATR) and 1%-risk position sizes
+6. **SUPER HUNTER MODE (v1.2):** for candidates scoring above 0.70 with a catalyst volume spike, places a marketable-limit buy on Robinhood sized at 1% account risk per trade, hard-capped at 5 concurrent positions and a 2% daily loss kill switch. Every entry gets an OCO — take-profit limit at 2x risk, stop-market at the 3xATR stop. Alerts push to Telegram and/or Discord on entry, TP, SL, and kill switch.
+
+## Setup
+
 ```bash
-git clone https://github.com/killerO311/unicorn-hunter.git
-cd unicorn-hunter
-pip install yfinance pandas numpy requests lxml html5lib
-export FMP_API_KEY=your_key   # optional — free at financialmodelingprep.com
+pip install -r requirements.txt
+export FMP_API_KEY=your_key            # optional — free at financialmodelingprep.com
+export RH_USERNAME=your_rh_email
+export RH_PASSWORD=your_rh_password
+export RH_ACCOUNT_NUMBER=704776962     # Zed account
+export TELEGRAM_BOT_TOKEN=...
+export TELEGRAM_CHAT_ID=...
+export DISCORD_WEBHOOK_URL=...
 python unicorn_hunter.py
 ```
 
-## Schedule it
-```cron
-0 8 * * 1-5  cd /path/to/unicorn-hunter && python unicorn_hunter.py
-```
-Runs 8 AM ET on weekdays — ninety minutes before the bell, when premarket volume and spreads reveal the real unicorns.
+## Schedule
 
-## Output
-Ranked table: ticker, price, RS%, volume multiple, tightness%, breakout%, float, score.
-Stop = price − 3×ATR. Size = 1% account risk ÷ risk-per-share.
-Float column shows source: FMP bulk or Finviz scrape.
+- Cron: `0 8 * * 1-5` (8 AM ET weekdays)
+- Or the `the-hunter-morning-scan` automation (already live, fires 8 AM ET)
 
-## Notes
-- FMP key optional: scanner runs without it via the Finviz fallback.
-- Finviz fallback is slower (~1-2 hours for the full universe) but needs no key.
-- Not financial advice. Backtest before sizing real money.
-- Named by Travis. Built by Grok. 🦄
+## Config knobs (top of unicorn_hunter.py)
+
+| Knob | Default | Meaning |
+|---|---|---|
+| SCORE_GATE | 0.70 | Min score to fire a trade |
+| MAX_POSITIONS | 5 | Concurrent long cap |
+| DAILY_LOSS_CAP | 2% | Kill switch |
+| RISK_PER_TRADE | 1% | Account risk per position |
+| TP_MULT | 2.0 | Take-profit distance in units of 3xATR risk |
+| ATR_MULT | 3.0 | Stop distance |
+
+## Risk notes
+
+- robin_stocks uses Robinhood's unofficial API — against ToS, account risk exists
+- The bot never shorts, never uses leverage beyond your margin, and respects buying power
+- Backtest before trusting it with size
+- Not financial advice
