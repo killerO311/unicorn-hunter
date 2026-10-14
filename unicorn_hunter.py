@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """
-THE HUNTER v1.0
-Qullamaggie-style breakout scanner + FMP bulk float filter.
+THE HUNTER v1.1
+Qullamaggie-style breakout scanner + FMP bulk float filter + Finviz zero-key fallback.
 
 Pipeline:
 1. Pull ~2,300 NYSE/Nasdaq tickers via yfinance (free, no API key)
 2. Compute 6 breakout factors: catalyst volume, RS vs SPY, consolidation
    tightness, breakout level, weekly confluence, ATR
-3. Bulk-fetch float from Financial Modeling Prep (free plan, 1 call)
+3. Bulk-fetch float from Financial Modeling Prep (free plan, 1 call);
+   if no FMP key, scrape float per-ticker from Finviz (zero-key fallback)
 4. Filter: float < 50M shares, price > $2, RS > 0, tight consolidation
 5. Rank and print top unicorn candidates
 
 Setup:
-  pip install yfinance pandas numpy requests
-  export FMP_API_KEY=your_key   # free at financialmodelingprep.com
+  pip install yfinance pandas numpy requests lxml html5lib
+  export FMP_API_KEY=your_key   # optional, free at financialmodelingprep.com
   python unicorn_hunter.py
 
-Schedule it: cron 0 9 * * 1-5  (9 AM ET, weekdays) or run manually.
+Schedule it: cron 0 8 * * 1-5  (8 AM ET, weekdays) or run manually.
 """
 
-import os, sys, time, json
+import os, sys, time, json, re
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -129,11 +130,11 @@ def compute_factors(closes, vols, highs, lows, spy):
     log(f"Factor table: {len(df)} valid tickers")
     return df
 
-# ---------------- 4. FLOAT (FMP BULK) ----------------
-def fetch_float_bulk():
+# ---------------- 4. FLOAT (FMP BULK + FINVIZ FALLBACK) ----------------
+def fetch_float_fmp():
     log("Fetching bulk float from FMP...")
     if not FMP_KEY:
-        log("WARNING: FMP_API_KEY not set — float filter skipped. Get free key at financialmodelingprep.com")
+        log("FMP_API_KEY not set — skipping FMP, trying Finviz fallback")
         return {}
     try:
         r = requests.get(FMP_URL, params={"apikey": FMP_KEY}, timeout=60)
@@ -145,11 +146,46 @@ def fetch_float_bulk():
             f = row.get("floatShares") or row.get("freeFloat")
             if t and f:
                 out[t] = int(f)
-        log(f"Float records: {len(out)}")
+        log(f"FMP float records: {len(out)}")
         return out
     except Exception as e:
         log(f"FMP fetch failed: {e}")
         return {}
+
+def fetch_float_finviz(tickers):
+    """Zero-key fallback: scrape float from Finviz quote pages."""
+    log(f"Finviz fallback: fetching float for {len(tickers)} tickers...")
+    out = {}
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; UnicornHunter/1.1)"}
+    for i, t in enumerate(tickers):
+        try:
+            r = requests.get(f"https://finviz.com/quote.ashx?t={t}",
+                             headers=headers, timeout=15)
+            if r.status_code != 200:
+                continue
+            m = re.search(
+                r'Shs Float</td><td[^>]*>([0-9,.]+)\s*([KMBT]?)</td>', r.text)
+            if m:
+                val = float(m.group(1).replace(",", ""))
+                mult = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}.get(m.group(2), 1)
+                out[t] = int(val * mult)
+            if (i + 1) % 50 == 0:
+                log(f"  Finviz progress: {i+1}/{len(tickers)}")
+                time.sleep(1.0)
+            else:
+                time.sleep(0.15)
+        except Exception:
+            continue
+    log(f"Finviz float records: {len(out)}")
+    return out
+
+def fetch_float_bulk(tickers=None):
+    fl = fetch_float_fmp()
+    if fl:
+        return fl
+    if tickers:
+        return fetch_float_finviz(tickers)
+    return {}
 
 def apply_float(df, fl):
     if not fl:
@@ -188,6 +224,7 @@ def report(df, uni):
     print("-"*78)
     print("Filters: float <= 50M | RS > 0 | 20d tightness < 35% | within 8% of 60d high")
     print("Stop = price - 3xATR. Position size = 1% account risk / risk_per_share.")
+    print("Float source: FMP bulk if key set, else Finviz scrape (zero-key).")
     print("NOTE: Not financial advice. Backtest before sizing real money.")
     print("="*78 + "\n")
     uni.to_csv("unicorn_candidates.csv", index=False)
@@ -198,7 +235,7 @@ def main():
     tickers = get_universe()
     closes, vols, highs, lows, spy = fetch_prices(tickers)
     df = compute_factors(closes, vols, highs, lows, spy)
-    fl = fetch_float_bulk()
+    fl = fetch_float_bulk(tickers)
     df = apply_float(df, fl)
     df, uni = rank(df)
     report(df, uni)
